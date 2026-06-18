@@ -91,8 +91,30 @@ logger = logging.getLogger("sync")
 # CSV PARSING
 # ─────────────────────────────────────────────
 def parse_csv(content: bytes) -> OrderedDict:
-    """Parse CSV bytes into a dict keyed by SKU."""
-    text = content.decode("utf-8-sig")
+    """Parse CSV bytes into a dict keyed by SKU, auto-detecting encoding."""
+    # Try encodings in order of likelihood for BCLDB extracts
+    encodings = ["utf-8-sig", "utf-8", "cp1252", "latin-1", "utf-16"]
+    text = None
+    used_encoding = None
+
+    for enc in encodings:
+        try:
+            text = content.decode(enc)
+            # Quick sanity check — does it look like a CSV with our key column?
+            if KEY_COLUMN in text or text.count(",") > 10:
+                used_encoding = enc
+                break
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+
+    if text is None:
+        # Last resort: decode with latin-1 (never fails, handles any byte)
+        text = content.decode("latin-1")
+        used_encoding = "latin-1 (fallback)"
+
+    logger.info(f"CSV decoded with encoding: {used_encoding}")
+
+    # Handle different line endings and CSV dialects
     reader = csv.DictReader(io.StringIO(text))
     products = OrderedDict()
     for row in reader:
