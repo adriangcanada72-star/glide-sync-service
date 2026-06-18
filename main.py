@@ -92,27 +92,37 @@ logger = logging.getLogger("sync")
 # ─────────────────────────────────────────────
 def parse_csv(content: bytes) -> OrderedDict:
     """Parse CSV bytes into a dict keyed by SKU, auto-detecting encoding."""
+    # Strip UTF-8 BOM bytes if present (before decoding)
+    if content.startswith(b'\xef\xbb\xbf'):
+        content = content[3:]
+        logger.info("Stripped UTF-8 BOM from file")
+
     # Try encodings in order of likelihood for BCLDB extracts
-    encodings = ["utf-8-sig", "utf-8", "cp1252", "latin-1", "utf-16"]
+    encodings = ["utf-8", "cp1252", "latin-1", "utf-16"]
     text = None
     used_encoding = None
 
     for enc in encodings:
         try:
-            text = content.decode(enc)
-            # Quick sanity check — does it look like a CSV with our key column?
-            if KEY_COLUMN in text or text.count(",") > 10:
+            decoded = content.decode(enc)
+            # Sanity check — must contain our key column name
+            if KEY_COLUMN in decoded:
+                text = decoded
                 used_encoding = enc
                 break
         except (UnicodeDecodeError, UnicodeError):
             continue
 
     if text is None:
-        # Last resort: decode with latin-1 (never fails, handles any byte)
+        # Fallback: decode with latin-1 (never fails) and hope for the best
         text = content.decode("latin-1")
         used_encoding = "latin-1 (fallback)"
+        logger.warning(f"Key column '{KEY_COLUMN}' not found in any encoding, using fallback")
 
     logger.info(f"CSV decoded with encoding: {used_encoding}")
+
+    # Clean up any stray BOM or invisible characters from column headers
+    text = text.replace('\ufeff', '')
 
     # Handle different line endings and CSV dialects
     reader = csv.DictReader(io.StringIO(text))
@@ -121,6 +131,8 @@ def parse_csv(content: bytes) -> OrderedDict:
         sku = row.get(KEY_COLUMN, "").strip()
         if sku:
             products[sku] = {k: (v.strip() if v else "") for k, v in row.items()}
+
+    logger.info(f"Parsed {len(products)} products from CSV")
     return products
 
 
