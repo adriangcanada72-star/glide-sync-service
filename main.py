@@ -91,20 +91,17 @@ logger = logging.getLogger("sync")
 # CSV PARSING
 # ─────────────────────────────────────────────
 def parse_csv(content: bytes) -> OrderedDict:
-    """Parse CSV bytes into a dict keyed by SKU, auto-detecting encoding."""
-    # Strip UTF-8 BOM bytes if present (before decoding)
-    if content.startswith(b'\xef\xbb\xbf'):
-        content = content[3:]
-        logger.info("Stripped UTF-8 BOM from file")
-
-    # Try encodings in order of likelihood for BCLDB extracts
-    encodings = ["utf-8", "cp1252", "latin-1", "utf-16"]
+    """Parse CSV/TSV bytes into a dict keyed by SKU, auto-detecting encoding and delimiter."""
+    # Try encodings — UTF-16 first (original BCLDB format), then UTF-8 variants (resaved)
+    encodings = ["utf-16", "utf-8-sig", "utf-8", "cp1252", "latin-1"]
     text = None
     used_encoding = None
 
     for enc in encodings:
         try:
             decoded = content.decode(enc)
+            # Strip any BOM characters
+            decoded = decoded.replace('\ufeff', '')
             # Sanity check — must contain our key column name
             if KEY_COLUMN in decoded:
                 text = decoded
@@ -114,25 +111,30 @@ def parse_csv(content: bytes) -> OrderedDict:
             continue
 
     if text is None:
-        # Fallback: decode with latin-1 (never fails) and hope for the best
-        text = content.decode("latin-1")
+        text = content.decode("latin-1").replace('\ufeff', '')
         used_encoding = "latin-1 (fallback)"
         logger.warning(f"Key column '{KEY_COLUMN}' not found in any encoding, using fallback")
 
     logger.info(f"CSV decoded with encoding: {used_encoding}")
 
-    # Clean up any stray BOM or invisible characters from column headers
-    text = text.replace('\ufeff', '')
+    # Auto-detect delimiter: tab (original BCLDB) vs comma (resaved CSV)
+    first_line = text.split('\n')[0] if text else ''
+    if '\t' in first_line:
+        delimiter = '\t'
+        logger.info("Detected delimiter: TAB (original BCLDB format)")
+    else:
+        delimiter = ','
+        logger.info("Detected delimiter: COMMA (standard CSV)")
 
-    # Handle different line endings and CSV dialects
-    reader = csv.DictReader(io.StringIO(text))
+    # Parse the file
+    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
     products = OrderedDict()
     for row in reader:
         sku = row.get(KEY_COLUMN, "").strip()
         if sku:
             products[sku] = {k: (v.strip() if v else "") for k, v in row.items()}
 
-    logger.info(f"Parsed {len(products)} products from CSV")
+    logger.info(f"Parsed {len(products)} products from file")
     return products
 
 
