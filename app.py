@@ -1,282 +1,434 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BCLDB Catalog Sync — The Terpene Sommelier</title>
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Playfair+Display:wght@700&display=swap" rel="stylesheet">
-<style>
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body {
-    font-family:'DM Sans',sans-serif; background:#1a1d23; color:#e0e0e0;
-    min-height:100vh; display:flex; flex-direction:column; align-items:center;
-    padding:40px 20px;
-  }
-  .container { max-width:640px; width:100%; }
-  h1 {
-    font-family:'Playfair Display',serif; font-size:28px; color:#31AA64;
-    margin-bottom:8px;
-  }
-  .subtitle { color:#888; font-size:14px; margin-bottom:32px; }
-  .status-bar {
-    background:#2D3139; border-radius:8px; padding:14px 18px;
-    margin-bottom:24px; display:flex; align-items:center; gap:10px;
-    font-size:13px;
-  }
-  .status-dot {
-    width:10px; height:10px; border-radius:50%; flex-shrink:0;
-  }
-  .status-dot.green { background:#31AA64; }
-  .status-dot.yellow { background:#F5A623; }
-  .status-dot.red { background:#E74C3C; }
+"""
+BCLDB Product Catalog → Glide Sync Service
+============================================
+A web service that accepts a new BCLDB CSV extract,
+compares it against the current Glide Product Catalog,
+and pushes adds/updates/deletes via the Glide API.
 
-  .upload-zone {
-    border:2px dashed #444; border-radius:12px; padding:48px 24px;
-    text-align:center; cursor:pointer; transition:all .2s;
-    margin-bottom:24px;
-  }
-  .upload-zone:hover, .upload-zone.dragover {
-    border-color:#31AA64; background:rgba(49,170,100,.05);
-  }
-  .upload-zone.has-file { border-color:#31AA64; border-style:solid; }
-  .upload-icon { font-size:48px; margin-bottom:12px; }
-  .upload-label { font-size:16px; font-weight:500; margin-bottom:6px; }
-  .upload-hint { font-size:12px; color:#666; }
-  .file-name { color:#31AA64; font-weight:700; font-size:16px; margin-top:8px; }
-  input[type="file"] { display:none; }
+Deploy to Railway, Render, or any Python host.
+Point your Glide "Upload" button to this service's URL.
+"""
 
-  .actions { display:flex; gap:12px; margin-bottom:24px; }
-  .btn {
-    flex:1; padding:14px; border:none; border-radius:8px; font-size:15px;
-    font-weight:700; cursor:pointer; font-family:'DM Sans',sans-serif;
-    transition:all .2s;
-  }
-  .btn:disabled { opacity:.4; cursor:not-allowed; }
-  .btn-preview { background:#2D3139; color:#e0e0e0; border:1px solid #444; }
-  .btn-preview:hover:not(:disabled) { background:#363b44; }
-  .btn-live { background:#31AA64; color:#fff; }
-  .btn-live:hover:not(:disabled) { background:#28954f; }
+import csv
+import io
+import os
+import time
+import json
+import logging
+from datetime import datetime
+from collections import OrderedDict
+from typing import Optional
 
-  .results { display:none; }
-  .results.visible { display:block; }
-  .result-card {
-    background:#2D3139; border-radius:8px; padding:18px;
-    margin-bottom:12px;
-  }
-  .result-header {
-    font-weight:700; font-size:15px; margin-bottom:12px;
-    display:flex; align-items:center; gap:8px;
-  }
-  .stat-row {
-    display:flex; justify-content:space-between; padding:6px 0;
-    border-bottom:1px solid #3a3f48; font-size:14px;
-  }
-  .stat-row:last-child { border-bottom:none; }
-  .stat-value { font-weight:700; }
-  .stat-value.add { color:#31AA64; }
-  .stat-value.update { color:#F5A623; }
-  .stat-value.delete { color:#E74C3C; }
-  .stat-value.unchanged { color:#888; }
+import httpx
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
-  .detail-section { margin-top:12px; }
-  .detail-section h3 {
-    font-size:13px; color:#888; text-transform:uppercase;
-    letter-spacing:.05em; margin-bottom:8px;
-  }
-  .detail-item {
-    font-size:13px; padding:4px 0; color:#ccc;
-  }
-  .detail-item .sku { color:#888; margin-right:8px; }
-  .change-detail {
-    font-size:11px; color:#888; padding-left:16px;
-  }
+# ─────────────────────────────────────────────
+# CONFIG — set these as environment variables on your host
+# ─────────────────────────────────────────────
+GLIDE_API_TOKEN = os.environ.get("GLIDE_API_TOKEN", "")
+GLIDE_APP_ID = os.environ.get("GLIDE_APP_ID", "")
+GLIDE_TABLE_ID = os.environ.get("GLIDE_TABLE_ID", "")
+GLIDE_TABLE_NAME = os.environ.get("GLIDE_TABLE_NAME", "native-table-Product Catalog")
+UPLOAD_SECRET = os.environ.get("UPLOAD_SECRET", "")  # Optional: protect the upload page
+PORT = int(os.environ.get("PORT", 8000))
 
-  .spinner {
-    display:inline-block; width:18px; height:18px;
-    border:2px solid #444; border-top-color:#31AA64;
-    border-radius:50%; animation:spin .6s linear infinite;
-  }
-  @keyframes spin { to { transform:rotate(360deg); } }
+# API endpoints
+GLIDE_V2_BASE = "https://api.glideapps.com"
+GLIDE_LEGACY_API = "https://api.glideapp.io/api/function/mutateTables"
 
-  .progress { display:none; text-align:center; padding:24px; }
-  .progress.visible { display:block; }
-  .progress-text { margin-top:12px; font-size:14px; color:#888; }
-</style>
-</head>
-<body>
+# Sync settings
+BATCH_SIZE = 100
+KEY_COLUMN = "SKU"
 
-<div class="container">
-  <h1>🌿 BCLDB Catalog Sync</h1>
-  <p class="subtitle">The Terpene Sommelier — Product Catalog Update Tool</p>
+COMPARE_COLUMNS = [
+    "PRODUCT_NAME", "BRAND_NAME", "SPECIES", "SUBCATEGORY",
+    "PER_RETAIL_UNIT_THC_MIN", "PER_RETAIL_UNIT_THC_MAX",
+    "PER_RETAIL_UNIT_CBD_MIN", "PER_RETAIL_UNIT_CBD_MAX",
+    "TERPENE_1_TYPE", "TERPENE_2_TYPE", "TERPENE_3_TYPE",
+    "ECOMM_LONG_DESCRIPTION", "WSL_LIFECYCLE_STATUS",
+    "WHOLESALE_PRICE_PER_UNIT",
+]
 
-  <div class="status-bar">
-    {% if api_configured %}
-    <div class="status-dot green"></div>
-    <span>Glide API connected — live sync available</span>
-    {% else %}
-    <div class="status-dot yellow"></div>
-    <span>Preview mode — Glide API not configured (set environment variables to enable live sync)</span>
-    {% endif %}
-  </div>
+ALL_COLUMNS = [
+    "SKU", "PRODUCT_NAME", "BRAND_NAME", "BC_INDIGENOUS_PRODUCT",
+    "SUBCATEGORY", "CLASS", "ORIGIN_COUNTRY", "ORIGIN_REGION",
+    "ORIGIN_SUBREGION", "SU_QTY_IN_EACH_CASE", "SU_CODE",
+    "SU_CODE_TYPE", "CASE_CODE", "CASE_CODE_TYPE",
+    "SU_PRODUCT_NET_SIZE", "SU_PRODUCT_NET_SIZE_UOM",
+    "SU_VOLUME_EQUIVALENCY", "SU_VOLUME_EQUIVALENCY_UOM",
+    "CASE_WEIGHT", "CASE_WEIGHT_UOM", "STRAIN", "SPECIES",
+    "PER_ACTIVATION_CBD_MAX", "PER_ACTIVATION_CBD_MIN",
+    "PER_ACTIVATION_CBD_UOM", "PER_ACTIVATION_THC_MAX",
+    "PER_ACTIVATION_THC_MIN", "PER_ACTIVATION_THC_UOM",
+    "PER_DISCRETE_UNIT_CBD_MAX", "PER_DISCRETE_UNIT_CBD_MIN",
+    "PER_DISCRETE_UNIT_CBD_UOM", "PER_DISCRETE_UNIT_THC_MAX",
+    "PER_DISCRETE_UNIT_THC_MIN", "PER_DISCRETE_UNIT_THC_UOM",
+    "PER_RETAIL_UNIT_CBD_MAX", "PER_RETAIL_UNIT_CBD_MIN",
+    "PER_RETAIL_UNIT_CBD_UOM", "PER_RETAIL_UNIT_THC_MAX",
+    "PER_RETAIL_UNIT_THC_MIN", "PER_RETAIL_UNIT_THC_UOM",
+    "EXTRACTION_PROCESS", "PACKAGING_MATERIAL",
+    "CONSUMPTION_METHOD", "HARVESTING_METHOD", "GROWING_METHOD",
+    "TERPENE_1_TYPE", "TERPENE_2_TYPE", "TERPENE_3_TYPE",
+    "NUMBER_OF_CONSUMER_ITEMS", "CONSUMER_ITEM_SIZE",
+    "CONSUMER_ITEM_SIZE_UOM", "ECOMM_SHORT_DESCRIPTION",
+    "ECOMM_LONG_DESCRIPTION", "WSL_LIFECYCLE_STATUS",
+    "WHOLESALE_PRICE_PER_UNIT",
+]
 
-  <div class="upload-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
-    <div class="upload-icon">📄</div>
-    <div class="upload-label">Drop BCLDB CSV extract here</div>
-    <div class="upload-hint">or click to browse</div>
-    <div class="file-name" id="fileName"></div>
-  </div>
-  <input type="file" id="fileInput" accept=".csv">
+# ─────────────────────────────────────────────
+# APP SETUP
+# ─────────────────────────────────────────────
+app = FastAPI(title="BCLDB Sync Service", version="1.0")
+templates = Jinja2Templates(directory="templates")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("sync")
 
-  <div class="actions">
-    <button class="btn btn-preview" id="btnPreview" disabled onclick="runSync('preview')">
-      Preview Changes
-    </button>
-    <button class="btn btn-live" id="btnLive" disabled onclick="runSync('live')">
-      {% if api_configured %}Sync to Glide{% else %}API Not Configured{% endif %}
-    </button>
-  </div>
 
-  <div class="progress" id="progress">
-    <div class="spinner"></div>
-    <div class="progress-text" id="progressText">Analyzing catalog...</div>
-  </div>
+# ─────────────────────────────────────────────
+# CSV PARSING
+# ─────────────────────────────────────────────
+def parse_csv(content: bytes) -> OrderedDict:
+    """Parse CSV bytes into a dict keyed by SKU."""
+    text = content.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(text))
+    products = OrderedDict()
+    for row in reader:
+        sku = row.get(KEY_COLUMN, "").strip()
+        if sku:
+            products[sku] = {k: (v.strip() if v else "") for k, v in row.items()}
+    return products
 
-  <div class="results" id="results"></div>
-</div>
 
-<script>
-const dropZone = document.getElementById('dropZone');
-const fileInput = document.getElementById('fileInput');
-const btnPreview = document.getElementById('btnPreview');
-const btnLive = document.getElementById('btnLive');
-let selectedFile = null;
+# ─────────────────────────────────────────────
+# GLIDE API CLIENT
+# ─────────────────────────────────────────────
+class GlideClient:
+    """Handles all communication with the Glide API."""
 
-// Drag and drop
-dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-dropZone.addEventListener('drop', e => {
-  e.preventDefault();
-  dropZone.classList.remove('dragover');
-  if (e.dataTransfer.files[0]) selectFile(e.dataTransfer.files[0]);
-});
+    def __init__(self):
+        self.token = GLIDE_API_TOKEN
+        self.app_id = GLIDE_APP_ID
+        self.table_id = GLIDE_TABLE_ID
+        self.table_name = GLIDE_TABLE_NAME
+        self.client = httpx.AsyncClient(timeout=30.0)
 
-fileInput.addEventListener('change', e => { if (e.target.files[0]) selectFile(e.target.files[0]); });
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.token and self.app_id and self.table_id)
 
-function selectFile(file) {
-  if (!file.name.endsWith('.csv')) { alert('Please select a CSV file'); return; }
-  selectedFile = file;
-  document.getElementById('fileName').textContent = file.name;
-  dropZone.classList.add('has-file');
-  btnPreview.disabled = false;
-  btnLive.disabled = !{{ 'true' if api_configured else 'false' }};
-}
+    @property
+    def headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
 
-async function runSync(mode) {
-  if (!selectedFile) return;
+    async def get_current_rows(self) -> OrderedDict:
+        """Fetch all current rows from Glide Product Catalog."""
+        if not self.is_configured:
+            return OrderedDict()
 
-  const progress = document.getElementById('progress');
-  const results = document.getElementById('results');
-  const progressText = document.getElementById('progressText');
+        all_rows = []
+        continuation = None
 
-  progress.classList.add('visible');
-  results.classList.remove('visible');
-  btnPreview.disabled = true;
-  btnLive.disabled = true;
+        while True:
+            payload = {
+                "appID": self.app_id,
+                "queries": [{"tableName": self.table_name}],
+            }
+            if continuation:
+                payload["queries"][0]["startAt"] = continuation
 
-  progressText.textContent = mode === 'live'
-    ? 'Syncing to Glide... this may take a minute'
-    : 'Analyzing catalog changes...';
+            response = await self.client.post(
+                "https://api.glideapp.io/api/function/queryTables",
+                headers=self.headers,
+                json=payload,
+            )
 
-  const formData = new FormData();
-  formData.append('file', selectedFile);
-  formData.append('mode', mode);
+            if response.status_code != 200:
+                logger.error(f"Failed to fetch rows: {response.status_code} {response.text[:200]}")
+                break
 
-  try {
-    const response = await fetch('/sync?mode=' + mode, {
-      method: 'POST',
-      body: formData,
-    });
-    const data = await response.json();
-    showResults(data);
-  } catch (err) {
-    results.innerHTML = `<div class="result-card"><div class="result-header">❌ Error</div>${err.message}</div>`;
-    results.classList.add('visible');
-  }
+            data = response.json()
+            if data and len(data) > 0:
+                rows = data[0].get("rows", [])
+                all_rows.extend(rows)
+                cont = data[0].get("next")
+                if cont:
+                    continuation = cont
+                else:
+                    break
+            else:
+                break
 
-  progress.classList.remove('visible');
-  btnPreview.disabled = false;
-  btnLive.disabled = !{{ 'true' if api_configured else 'false' }};
-}
+        # Convert to SKU-keyed dict
+        products = OrderedDict()
+        for row in all_rows:
+            sku = str(row.get(KEY_COLUMN, row.get("SKU", ""))).strip()
+            if sku:
+                row["_row_id"] = row.get("$rowID", "")
+                products[sku] = row
 
-function showResults(data) {
-  const s = data.summary;
-  const results = document.getElementById('results');
+        logger.info(f"Fetched {len(products)} current products from Glide")
+        return products
 
-  let statusIcon = data.status === 'completed' ? '✅' : data.status === 'error' ? '❌' : '📋';
-  let statusText = data.status === 'completed' ? 'Sync Complete' :
-                    data.status === 'no_changes' ? 'No Changes' :
-                    data.status === 'error' ? 'Error' : 'Preview Report';
+    async def execute_mutations(self, mutations: list) -> dict:
+        """Execute a batch of mutations via the legacy API."""
+        results = {"success": 0, "failed": 0, "errors": []}
 
-  let html = `
-    <div class="result-card">
-      <div class="result-header">${statusIcon} ${statusText}</div>
-      <div class="stat-row"><span>Products in new extract</span><span class="stat-value">${s.new_total}</span></div>
-      <div class="stat-row"><span>Products in current catalog</span><span class="stat-value">${s.current_total || 'N/A (API not connected)'}</span></div>
-      <div class="stat-row"><span>Unchanged</span><span class="stat-value unchanged">${s.unchanged}</span></div>
-      <div class="stat-row"><span>New products to add</span><span class="stat-value add">+${s.add}</span></div>
-      <div class="stat-row"><span>Products to update</span><span class="stat-value update">${s.update}</span></div>
-      <div class="stat-row"><span>Products to remove</span><span class="stat-value delete">-${s.delete}</span></div>
-    </div>`;
+        for i in range(0, len(mutations), BATCH_SIZE):
+            batch = mutations[i:i + BATCH_SIZE]
+            payload = {
+                "appID": self.app_id,
+                "mutations": batch,
+            }
 
-  if (data.details) {
-    const d = data.details;
+            try:
+                response = await self.client.post(
+                    GLIDE_LEGACY_API,
+                    headers=self.headers,
+                    json=payload,
+                )
 
-    if (d.new_products && d.new_products.length > 0) {
-      html += `<div class="result-card"><div class="detail-section"><h3>➕ New Products</h3>`;
-      d.new_products.forEach(p => {
-        html += `<div class="detail-item"><span class="sku">${p.sku}</span>${p.name}</div>`;
-      });
-      if (s.add > 50) html += `<div class="detail-item" style="color:#666">... and ${s.add - 50} more</div>`;
-      html += `</div></div>`;
+                if response.status_code == 200:
+                    results["success"] += len(batch)
+                    logger.info(f"Batch {i // BATCH_SIZE + 1}: {len(batch)} mutations OK")
+                else:
+                    results["failed"] += len(batch)
+                    error_msg = f"Batch {i // BATCH_SIZE + 1}: HTTP {response.status_code}"
+                    results["errors"].append(error_msg)
+                    logger.error(f"{error_msg}: {response.text[:200]}")
+
+            except Exception as e:
+                results["failed"] += len(batch)
+                results["errors"].append(str(e))
+                logger.error(f"Batch error: {e}")
+
+            # Rate limiting — pause between batches
+            if i + BATCH_SIZE < len(mutations):
+                await asyncio.sleep(1)
+
+        return results
+
+    async def close(self):
+        await self.client.aclose()
+
+
+glide = GlideClient()
+
+
+# ─────────────────────────────────────────────
+# COMPARISON ENGINE
+# ─────────────────────────────────────────────
+def compare_catalogs(new_data: dict, current_data: dict) -> dict:
+    """Compare new extract against current catalog."""
+    new_skus = set(new_data.keys())
+    current_skus = set(current_data.keys())
+
+    to_add = []
+    to_update = []
+    to_delete = []
+    unchanged = []
+
+    for sku in sorted(new_skus - current_skus):
+        to_add.append({"sku": sku, "data": new_data[sku]})
+
+    for sku in sorted(current_skus - new_skus):
+        to_delete.append({
+            "sku": sku,
+            "name": current_data[sku].get("PRODUCT_NAME", "?"),
+            "brand": current_data[sku].get("BRAND_NAME", "?"),
+            "row_id": current_data[sku].get("_row_id", current_data[sku].get("Row ID", "")),
+        })
+
+    for sku in sorted(new_skus & current_skus):
+        changes = {}
+        for col in COMPARE_COLUMNS:
+            new_val = new_data[sku].get(col, "")
+            cur_val = current_data[sku].get(col, "")
+            if new_val != cur_val:
+                changes[col] = {"old": cur_val, "new": new_val}
+
+        if changes:
+            to_update.append({
+                "sku": sku,
+                "name": new_data[sku].get("PRODUCT_NAME", "?"),
+                "changes": changes,
+                "full_data": new_data[sku],
+                "row_id": current_data[sku].get("_row_id", current_data[sku].get("Row ID", "")),
+            })
+        else:
+            unchanged.append(sku)
+
+    return {
+        "to_add": to_add,
+        "to_update": to_update,
+        "to_delete": to_delete,
+        "unchanged_count": len(unchanged),
+        "summary": {
+            "new_total": len(new_data),
+            "current_total": len(current_data),
+            "add": len(to_add),
+            "update": len(to_update),
+            "delete": len(to_delete),
+            "unchanged": len(unchanged),
+        },
     }
 
-    if (d.updated_products && d.updated_products.length > 0) {
-      html += `<div class="result-card"><div class="detail-section"><h3>✏️ Updated Products</h3>`;
-      d.updated_products.forEach(p => {
-        html += `<div class="detail-item"><span class="sku">${p.sku}</span>${p.name}</div>`;
-        Object.entries(p.changes).forEach(([col, vals]) => {
-          html += `<div class="change-detail">${col}: ${(vals.old||'(empty)').substring(0,30)} → ${(vals.new||'(empty)').substring(0,30)}</div>`;
-        });
-      });
-      if (s.update > 50) html += `<div class="detail-item" style="color:#666">... and ${s.update - 50} more</div>`;
-      html += `</div></div>`;
+
+def build_mutations(comparison: dict) -> list:
+    """Build Glide API mutation payloads from comparison results."""
+    mutations = []
+
+    for item in comparison["to_add"]:
+        col_values = {col: item["data"].get(col, "") for col in ALL_COLUMNS}
+        mutations.append({
+            "kind": "add-row-to-table",
+            "tableName": GLIDE_TABLE_NAME,
+            "columnValues": col_values,
+        })
+
+    for item in comparison["to_update"]:
+        if item.get("row_id"):
+            mutations.append({
+                "kind": "set-columns-in-row",
+                "tableName": GLIDE_TABLE_NAME,
+                "rowID": item["row_id"],
+                "columnValues": {col: vals["new"] for col, vals in item["changes"].items()},
+            })
+
+    for item in comparison["to_delete"]:
+        if item.get("row_id"):
+            mutations.append({
+                "kind": "delete-row",
+                "tableName": GLIDE_TABLE_NAME,
+                "rowID": item["row_id"],
+            })
+
+    return mutations
+
+
+# ─────────────────────────────────────────────
+# ROUTES
+# ─────────────────────────────────────────────
+@app.get("/", response_class=HTMLResponse)
+async def upload_page(request: Request):
+    """Serve the upload page."""
+    return templates.TemplateResponse("upload.html", {
+        "request": request,
+        "api_configured": glide.is_configured,
+    })
+
+
+@app.post("/sync")
+async def sync_catalog(
+    file: UploadFile = File(...),
+    mode: str = "preview",  # "preview" or "live"
+    secret: str = "",
+):
+    """
+    Main sync endpoint.
+    - mode=preview: compare and report only (no API calls)
+    - mode=live: compare and push changes to Glide
+    """
+    # Optional secret check
+    if UPLOAD_SECRET and secret != UPLOAD_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid upload secret")
+
+    # Validate file
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Please upload a CSV file")
+
+    logger.info(f"Received file: {file.filename} (mode: {mode})")
+
+    # Parse uploaded CSV
+    content = await file.read()
+    try:
+        new_data = parse_csv(content)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse CSV: {str(e)}")
+
+    if not new_data:
+        raise HTTPException(status_code=400, detail="No products found in CSV")
+
+    logger.info(f"Parsed {len(new_data)} products from upload")
+
+    # Get current data from Glide
+    if glide.is_configured:
+        current_data = await glide.get_current_rows()
+    else:
+        current_data = OrderedDict()
+        logger.warning("Glide API not configured — running in preview-only mode")
+
+    # Compare
+    comparison = compare_catalogs(new_data, current_data)
+    summary = comparison["summary"]
+
+    # Build response
+    result = {
+        "status": "preview",
+        "timestamp": datetime.now().isoformat(),
+        "file": file.filename,
+        "summary": summary,
+        "details": {
+            "new_products": [
+                {"sku": item["sku"], "name": item["data"].get("PRODUCT_NAME", "?")}
+                for item in comparison["to_add"][:50]
+            ],
+            "updated_products": [
+                {
+                    "sku": item["sku"],
+                    "name": item.get("name", "?"),
+                    "changes": {col: vals for col, vals in item["changes"].items()},
+                }
+                for item in comparison["to_update"][:50]
+            ],
+            "deleted_products": [
+                {"sku": item["sku"], "name": item.get("name", "?")}
+                for item in comparison["to_delete"][:50]
+            ],
+        },
     }
 
-    if (d.deleted_products && d.deleted_products.length > 0) {
-      html += `<div class="result-card"><div class="detail-section"><h3>🗑️ Removed Products</h3>`;
-      d.deleted_products.forEach(p => {
-        html += `<div class="detail-item"><span class="sku">${p.sku}</span>${p.name}</div>`;
-      });
-      if (s.delete > 50) html += `<div class="detail-item" style="color:#666">... and ${s.delete - 50} more</div>`;
-      html += `</div></div>`;
+    # Execute if live mode
+    if mode == "live" and glide.is_configured:
+        mutations = build_mutations(comparison)
+        if mutations:
+            logger.info(f"Executing {len(mutations)} mutations...")
+            import asyncio
+            exec_result = await glide.execute_mutations(mutations)
+            result["status"] = "completed"
+            result["execution"] = exec_result
+        else:
+            result["status"] = "no_changes"
+    elif mode == "live" and not glide.is_configured:
+        result["status"] = "error"
+        result["error"] = "Glide API not configured. Set GLIDE_API_TOKEN, GLIDE_APP_ID, and GLIDE_TABLE_ID environment variables."
+
+    return JSONResponse(result)
+
+
+@app.get("/health")
+async def health():
+    """Health check endpoint."""
+    return {
+        "status": "ok",
+        "api_configured": glide.is_configured,
+        "timestamp": datetime.now().isoformat(),
     }
-  }
 
-  if (data.execution) {
-    html += `<div class="result-card">
-      <div class="result-header">API Execution</div>
-      <div class="stat-row"><span>Successful</span><span class="stat-value add">${data.execution.success}</span></div>
-      <div class="stat-row"><span>Failed</span><span class="stat-value delete">${data.execution.failed}</span></div>
-    </div>`;
-  }
 
-  if (data.error) {
-    html += `<div class="result-card"><div class="result-header">⚠️ Note</div><p style="font-size:13px;color:#888">${data.error}</p></div>`;
-  }
+@app.on_event("shutdown")
+async def shutdown():
+    await glide.close()
 
-  results.innerHTML = html;
-  results.classList.add('visible');
-}
-</script>
-</body>
-</html>
+
+# ─────────────────────────────────────────────
+# RUN
+# ─────────────────────────────────────────────
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
