@@ -1,0 +1,102 @@
+# BCLDB Product Catalog Sync Service
+## The Terpene Sommelier — Greenery Cannabis Boutique
+
+A web service that syncs BCLDB product catalog CSV extracts with your Glide app's Product Catalog table.
+
+## How It Works
+
+1. Manager taps "Upload Catalog" button in the Glide app
+2. Button opens this service's URL
+3. Manager drops the new BCLDB CSV file
+4. Service compares against current Glide data
+5. Preview shows adds/updates/deletes
+6. One click to push changes to Glide
+
+## Current Status
+
+**Preview mode** — works now without Glide API access. Compares two CSV files and shows what would change. Use the command-line tool (glide_sync.py) for local comparison.
+
+**Live mode** — ready to activate when you upgrade to a Glide paid plan with API access. Just add your credentials as environment variables.
+
+## Setup
+
+### Local Development
+```bash
+pip install -r requirements.txt
+python app.py
+# Open http://localhost:8000
+```
+
+### Deploy to Railway
+1. Push this folder to a GitHub repo
+2. Go to railway.app → New Project → Deploy from GitHub
+3. Add environment variables (see below)
+4. Railway auto-detects the Procfile and deploys
+
+### Deploy to Render
+1. Push to GitHub
+2. Go to render.com → New Web Service → Connect repo
+3. Build command: `pip install -r requirements.txt`
+4. Start command: `uvicorn app:app --host 0.0.0.0 --port $PORT`
+5. Add environment variables
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GLIDE_API_TOKEN` | For live sync | Your Glide API bearer token |
+| `GLIDE_APP_ID` | For live sync | Your Glide app ID |
+| `GLIDE_TABLE_ID` | For live sync | Product Catalog table ID |
+| `GLIDE_TABLE_NAME` | Optional | Table name in Glide (default: "native-table-Product Catalog") |
+| `UPLOAD_SECRET` | Optional | Password to protect the upload page |
+| `PORT` | Optional | Server port (default: 8000) |
+
+## Finding Your Glide Credentials
+
+1. **App ID**: In Glide → Settings → look for the app ID in the URL
+2. **Table ID**: In Glide → Data → Product Catalog → Show API → copy the table ID
+3. **API Token**: In Glide → Settings → API → generate a token (requires paid plan)
+
+## Connecting to Your Glide App
+
+Once deployed, your service has a public URL like:
+`https://your-app.railway.app`
+
+In Glide, set the "Upload Catalog" button to:
+- Action: **Open Link**
+- URL: `https://your-app.railway.app`
+
+## File Structure
+
+```
+glide-sync-service/
+  app.py              — FastAPI web service
+  templates/
+    upload.html       — Upload page (Terpene Sommelier branded)
+  requirements.txt    — Python dependencies
+  Procfile           — Deployment config
+  README.md          — This file
+
+glide_sync.py         — Standalone CLI tool (for local use)
+```
+
+## API Endpoints
+
+- `GET /` — Upload page (HTML)
+- `POST /sync` — Sync endpoint (accepts CSV file, returns JSON report)
+  - `mode=preview` — compare only, no API calls
+  - `mode=live` — compare and push changes to Glide
+- `GET /health` — Health check
+
+## Smart Sync vs Full Overwrite
+
+**Smart sync** (default): Compares by SKU, only touches what changed.
+- Fewer API calls
+- Preserves Glide Row IDs
+- Computed columns stay stable
+- Product_Custom descriptions survive
+
+**Full overwrite**: Replaces entire table.
+- Simpler but uses more API calls
+- Clears user-specific columns
+- Use only if smart sync has issues
