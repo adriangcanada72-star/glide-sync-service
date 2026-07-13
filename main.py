@@ -9,6 +9,7 @@ Deploy to Railway, Render, or any Python host.
 Point your Glide "Upload" button to this service's URL.
 """
 
+import asyncio
 import csv
 import io
 import os
@@ -24,6 +25,8 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
+import consumer_card
 
 # ─────────────────────────────────────────────
 # CONFIG — set these as environment variables on your host
@@ -392,6 +395,14 @@ async def sync_catalog(
 
     logger.info(f"Parsed {len(new_data)} products from upload")
 
+    # Capture the consumer catalog from this same parse — no Glide API needed.
+    # Runs on preview as well as live, so /card is populated either way.
+    try:
+        slim = consumer_card.build_slim_catalog(new_data, source_file=file.filename)
+        consumer_card.save_catalog(slim)
+    except Exception as e:
+        logger.error(f"Consumer catalog build failed (sync continues): {e}")
+
     # Get current data from Glide
     if glide.is_configured:
         current_data = await glide.get_current_rows()
@@ -434,7 +445,6 @@ async def sync_catalog(
         mutations = build_mutations(comparison)
         if mutations:
             logger.info(f"Executing {len(mutations)} mutations...")
-            import asyncio
             exec_result = await glide.execute_mutations(mutations)
             result["status"] = "completed"
             result["execution"] = exec_result
@@ -447,14 +457,52 @@ async def sync_catalog(
     return JSONResponse(result)
 
 
+@app.get("/card")
+async def get_card(code: str = ""):
+    """
+    Consumer product lookup by scanned barcode.
+      GET /card?code=628188006371
+    Returns the product JSON for the hockey card, or 404 if unknown.
+    """
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing ?code= parameter")
+
+    product = consumer_card.lookup_card(code)
+
+    if product is None:
+        if not consumer_card.catalog_status()["loaded"]:
+            raise HTTPException(
+                status_code=503,
+                detail="Catalog not loaded yet. Upload a BCLDB CSV to populate it.",
+            )
+        raise HTTPException(status_code=404, detail=f"No product found for code {code}")
+
+    return JSONResponse(product, headers={"Access-Control-Allow-Origin": "*"})
+
+
+@app.get("/card/status")
+async def card_status():
+    """Diagnostics: is the consumer catalog loaded, and how big is it?"""
+    return consumer_card.catalog_status()
+
+
 @app.get("/health")
 async def health():
     """Health check endpoint."""
+    status = consumer_card.catalog_status()
     return {
         "status": "ok",
         "api_configured": glide.is_configured,
+        "catalog_loaded": status["loaded"],
+        "catalog_products": status["product_count"],
         "timestamp": datetime.now().isoformat(),
     }
+
+
+@app.on_event("startup")
+async def startup():
+    """Load the persisted consumer catalog, if a volume is mounted."""
+    consumer_card.load_catalog()
 
 
 @app.on_event("shutdown")
