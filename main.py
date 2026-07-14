@@ -457,6 +457,93 @@ async def sync_catalog(
     return JSONResponse(result)
 
 
+@app.get("/catalog", response_class=HTMLResponse)
+async def catalog_page():
+    """Upload page for the Glide catalog export (populates the consumer cards)."""
+    status = consumer_card.catalog_status()
+    loaded = status["product_count"]
+    triax = status.get("meta", {}).get("with_triax", 0)
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Consumer Catalog</title>
+<style>
+ body{{font-family:system-ui,sans-serif;background:#16181A;color:#F2F3F4;
+      display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px}}
+ .box{{background:#2D3139;border-radius:16px;padding:32px;max-width:520px;width:100%}}
+ h1{{margin:0 0 6px;font-size:1.3rem}}
+ p{{color:#9AA0A6;line-height:1.6;font-size:.9rem}}
+ .stat{{background:#22262C;border-radius:10px;padding:14px 16px;margin:18px 0;font-size:.9rem}}
+ .stat b{{color:#31AA64}}
+ input[type=file]{{width:100%;padding:12px;background:#22262C;border:1px dashed #4A505A;
+   border-radius:10px;color:#F2F3F4;margin-bottom:14px}}
+ button{{width:100%;padding:14px;background:#31AA64;color:#fff;border:none;
+   border-radius:10px;font-weight:700;font-size:1rem;cursor:pointer}}
+ #out{{margin-top:16px;font-size:.85rem;white-space:pre-wrap;color:#9AA0A6}}
+</style></head><body><div class="box">
+<h1>Consumer Catalog</h1>
+<p>Upload a <b>Glide Product Catalog export</b>. It carries the TRIAX columns the
+main app computes, so the consumer cards show the same scores as the staff app.
+This does not touch Glide.</p>
+<div class="stat">Loaded: <b>{loaded}</b> products &nbsp;·&nbsp; with TRIAX: <b>{triax}</b></div>
+<form id="f"><input type="file" name="file" accept=".csv" required>
+<button type="submit">Upload &amp; rebuild</button></form>
+<div id="out"></div>
+<script>
+document.getElementById('f').onsubmit = async e => {{
+  e.preventDefault();
+  const out = document.getElementById('out');
+  out.textContent = 'Uploading…';
+  const fd = new FormData(e.target);
+  try {{
+    const r = await fetch('/catalog/upload', {{method:'POST', body:fd}});
+    const j = await r.json();
+    out.textContent = r.ok
+      ? `Done. ${{j.products}} products, ${{j.with_triax}} with TRIAX.\n${{j.note}}`
+      : `Error: ${{j.detail || 'upload failed'}}`;
+    if (r.ok) setTimeout(()=>location.reload(), 1600);
+  }} catch (err) {{ out.textContent = 'Error: ' + err; }}
+}};
+</script></div></body></html>"""
+
+
+@app.post("/catalog/upload")
+async def catalog_upload(file: UploadFile = File(...)):
+    """
+    Build the consumer catalog from a **Glide Product Catalog export**.
+
+    Why the Glide export and not the raw BCLDB file: the export carries the
+    TRIAX columns (Cerebral_Final, Somatic_Final, Overall_Final, the
+    descriptors and Leaning) that the main app computes. Reading them here
+    means the consumer card can never disagree with the staff app — we are
+    not recreating the formula, we are reading its output.
+
+    This endpoint does NOT touch Glide. It only refreshes /card.
+    """
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Please upload a .csv file")
+
+    content = await file.read()
+    products = parse_csv(content)
+    if not products:
+        raise HTTPException(status_code=400, detail="No products found in file")
+
+    slim = consumer_card.build_slim_catalog(products, source_file=file.filename)
+    saved = consumer_card.save_catalog(slim)
+    meta = slim["meta"]
+
+    return {
+        "ok": True,
+        "products": meta["product_count"],
+        "with_triax": meta.get("with_triax", 0),
+        "skipped_no_code": meta["skipped_no_code"],
+        "persisted": saved,
+        "note": (
+            "TRIAX present — consumer cards will show the main app's scores."
+            if meta.get("with_triax") else
+            "No TRIAX columns found. Upload a Glide catalog export to include them."
+        ),
+    }
+
+
 @app.get("/card")
 async def get_card(code: str = ""):
     """
