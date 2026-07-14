@@ -92,6 +92,15 @@ def _num(v: str):
         return None
 
 
+def _int_or_none(v):
+    """'-4' -> -4  |  '' -> None. TRIAX scores are integers from -5 to +5."""
+    try:
+        s = str(v).strip()
+        return int(float(s)) if s else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _tidy(n: float) -> str:
     """24.0 -> '24'   |   0.5 -> '0.5'"""
     return str(int(n)) if n == int(n) else f"{n:g}"
@@ -129,6 +138,7 @@ def build_slim_catalog(products: dict, source_file: str = "") -> dict:
     """
     index = {}
     skipped_no_code = 0
+    has_triax = 0
 
     for sku, row in products.items():
         code = normalise_code(row.get("SU_CODE", ""))
@@ -142,7 +152,7 @@ def build_slim_catalog(products: dict, source_file: str = "") -> dict:
             normalise_terpene(row.get("TERPENE_3_TYPE", "")),
         ]
 
-        index[code] = {
+        entry = {
             "sku": sku,
             "name": row.get("PRODUCT_NAME", "").strip(),
             "brand": row.get("BRAND_NAME", "").strip(),
@@ -160,11 +170,32 @@ def build_slim_catalog(products: dict, source_file: str = "") -> dict:
                                 row.get("PER_RETAIL_UNIT_CBD_UOM", "")),
             "terpenes": [t for t in terps if t],
             "description": row.get("ECOMM_LONG_DESCRIPTION", "").strip(),
+            "logo": row.get("Brand Logo", "").strip(),
         }
+
+        # TRIAX — present only when the upload is a Glide catalog export.
+        # These are the main app's own computed values, so the consumer card
+        # can never disagree with the staff app.
+        cer = _int_or_none(row.get("Cerebral_Final"))
+        som = _int_or_none(row.get("Somatic_Final"))
+        ovr = _int_or_none(row.get("Overall_Final"))
+        if cer is not None or som is not None or ovr is not None:
+            entry["triax"] = {
+                "cerebral": cer,
+                "somatic": som,
+                "overall": ovr,
+                "cerebral_desc": row.get("Cerebral_Descriptor", "").strip(),
+                "somatic_desc": row.get("Somatic_Descriptor", "").strip(),
+                "overall_desc": row.get("Overall_Descriptor", "").strip(),
+                "leaning": row.get("Leaning", "").strip(),   # e.g. "Indica Leaning"
+            }
+            has_triax += 1
+
+        index[code] = entry
 
     logger.info(
         f"Slim catalog built: {len(index)} products indexed by SU_CODE "
-        f"({skipped_no_code} skipped — no SU_CODE)"
+        f"({skipped_no_code} skipped — no SU_CODE; {has_triax} with TRIAX)"
     )
 
     return {
@@ -172,6 +203,7 @@ def build_slim_catalog(products: dict, source_file: str = "") -> dict:
             "built_at": datetime.now().isoformat(),
             "product_count": len(index),
             "skipped_no_code": skipped_no_code,
+            "with_triax": has_triax,
             "source_file": source_file,
         },
         "products": index,
